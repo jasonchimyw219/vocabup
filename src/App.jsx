@@ -205,8 +205,10 @@ export default function App() {
 
   function nextQuestion() {
     setShowResult(false);
-    if (currentQ + 1 >= quiz.length) { setQuizDone(true); updateStreak(); }
-    else setCurrentQ(p => p+1);
+    setTimeout(() => {
+      if (currentQ + 1 >= quiz.length) { setQuizDone(true); updateStreak(); }
+      else setCurrentQ(p => p+1);
+    }, 50);
   }
 
   const score = quiz.filter(q => q.status === "correct").length;
