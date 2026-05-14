@@ -255,7 +255,7 @@ export default function App() {
             <input value={inputWord} onChange={e => setInputWord(e.target.value)}
               onKeyDown={e => e.key==="Enter" && handleLookup()}
               placeholder="Type a word or phrase…"
-              style={{ flex:1, fontSize:15, padding:"9px 12px", borderRadius:8, border:"1px solid #ccc", outline:"none", background:"#fff" }}
+              style={{ flex:1, fontSize:15, padding:"9px 12px", borderRadius:8, border:"1px solid #ccc", outline:"none", background:"#fff", color:"#111" }}
             />
             <button onClick={handleLookup} disabled={loading || !inputWord.trim()} style={{
               ...btn,
@@ -392,7 +392,7 @@ export default function App() {
                         onChange={e => handleAnswer(e.target.value)}
                         onKeyDown={e => e.key==="Enter" && q.userAnswer.trim() && submitAnswer()}
                         placeholder="Type your answer…"
-                        style={{ flex:1, fontSize:15, padding:"9px 12px", borderRadius:8, border:"1px solid #ccc", outline:"none", background:"#fff" }}
+                        style={{ flex:1, fontSize:15, padding:"9px 12px", borderRadius:8, border:"1px solid #ccc", outline:"none", background:"#fff", color:"#111" }}
                       />
                       <button onClick={submitAnswer} disabled={!q.userAnswer.trim()} style={{
                         ...btn, border:"none",
