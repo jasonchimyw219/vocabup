@@ -1,10 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 
-// ── Replace this with your Cloudflare Worker URL ──────────────────────────────
 const WORKER_URL = "https://vocabup-proxy.jasonchimyw.workers.dev/";
-// ─────────────────────────────────────────────────────────────────────────────
 
-// ── Storage: uses localStorage (works in any browser) ────────────────────────
 const storage = {
   get: (key) => { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : null; } catch(_) { return null; } },
   set: (key, val) => { try { localStorage.setItem(key, JSON.stringify(val)); } catch(_) {} },
@@ -24,11 +21,8 @@ function calcWeight(v) {
   const shown = v.timesShown || 0;
   const correct = v.timesCorrect || 0;
   const ratio = shown === 0 ? 0 : correct / shown;
-  const daysSince = v.lastShown
-    ? Math.max(0, (Date.now() - new Date(v.lastShown).getTime()) / 86400000)
-    : 999;
-  const recencyBonus = Math.min(daysSince * 0.3, 3);
-  return Math.max(1, 5 - ratio * 4 + recencyBonus);
+  const daysSince = v.lastShown ? Math.max(0, (Date.now() - new Date(v.lastShown).getTime()) / 86400000) : 999;
+  return Math.max(1, 5 - ratio * 4 + Math.min(daysSince * 0.3, 3));
 }
 
 function weightedSample(list, n) {
@@ -38,15 +32,9 @@ function weightedSample(list, n) {
   const cap = Math.min(n, pool.length);
   let safety = 0;
   while (picked.length < cap && safety++ < 300) {
-    let r = Math.random() * totalW;
-    let added = false;
-    for (const v of pool) {
-      r -= v._w;
-      if (r <= 0 && !used.has(v.id)) { picked.push(v); used.add(v.id); added = true; break; }
-    }
-    if (!added) {
-      for (const v of pool) { if (!used.has(v.id)) { picked.push(v); used.add(v.id); break; } }
-    }
+    let r = Math.random() * totalW, added = false;
+    for (const v of pool) { r -= v._w; if (r <= 0 && !used.has(v.id)) { picked.push(v); used.add(v.id); added = true; break; } }
+    if (!added) { for (const v of pool) { if (!used.has(v.id)) { picked.push(v); used.add(v.id); break; } } }
   }
   return picked;
 }
@@ -104,10 +92,9 @@ export default function App() {
   const [quizDone, setQuizDone]       = useState(false);
   const [quizStarted, setQuizStarted] = useState(false);
   const [currentQ, setCurrentQ]       = useState(0);
-  const [showResult, setShowResult]   = useState(false);
   const [streak, setStreak]           = useState({ count:0, lastDate:"" });
+  const [inputVal, setInputVal]       = useState("");
 
-  // ── Load from localStorage on startup ──
   useEffect(() => {
     const savedVocab  = storage.get(SK.vocab);
     const savedStreak = storage.get(SK.streak);
@@ -115,17 +102,9 @@ export default function App() {
     if (savedStreak) setStreak(savedStreak);
   }, []);
 
-  // ── Save vocab whenever it changes ──
-  useEffect(() => {
-    storage.set(SK.vocab, vocabList);
-  }, [vocabList]);
+  useEffect(() => { storage.set(SK.vocab, vocabList); }, [vocabList]);
+  useEffect(() => { storage.set(SK.streak, streak); }, [streak]);
 
-  // ── Save streak whenever it changes ──
-  useEffect(() => {
-    storage.set(SK.streak, streak);
-  }, [streak]);
-
-  // ── Load/build quiz when entering quiz tab ──
   useEffect(() => {
     if (tab !== 2 || !vocabList.length) return;
     const lastDate  = storage.get(SK.lastQuiz);
@@ -140,6 +119,7 @@ export default function App() {
     } else {
       setQuiz(buildQuiz(vocabList)); setQuizStarted(false); setQuizDone(false); setCurrentQ(0);
     }
+    setInputVal("");
   }, [tab, vocabList]);
 
   const saveQuiz = useCallback((q) => {
@@ -183,40 +163,43 @@ export default function App() {
 
   function startQuiz() {
     const q = buildQuiz(vocabList);
-    setQuiz(q); setCurrentQ(0); setQuizStarted(true); setQuizDone(false); setShowResult(false);
-    saveQuiz(q);
+    setQuiz(q); setCurrentQ(0); setQuizStarted(true); setQuizDone(false);
+    setInputVal(""); saveQuiz(q);
   }
 
-  function handleAnswer(val) {
-    setQuiz(prev => prev.map((q,i) => i===currentQ ? {...q, userAnswer:val} : q));
-  }
-
+  // ── KEY FIX: status is stored on the quiz item itself, not in separate showResult state ──
   function submitAnswer() {
     const q = quiz[currentQ];
-    const correct = q.userAnswer.toLowerCase().trim() === q.answer;
+    if (q.status !== "unanswered") return; // prevent double submit
+    const correct = inputVal.toLowerCase().trim() === q.answer;
     updateVocabStats(q.id, correct);
     setQuiz(prev => {
-      const updated = prev.map((item,i) => i===currentQ ? {...item, status: correct?"correct":"wrong"} : item);
+      const updated = prev.map((item, i) =>
+        i === currentQ ? { ...item, userAnswer: inputVal, status: correct ? "correct" : "wrong" } : item
+      );
       saveQuiz(updated);
       return updated;
     });
-    setShowResult(true);
   }
 
   function nextQuestion() {
-    setShowResult(false);
-    setTimeout(() => {
-      if (currentQ + 1 >= quiz.length) { setQuizDone(true); updateStreak(); }
-      else setCurrentQ(p => p+1);
-    }, 50);
+    setInputVal("");
+    if (currentQ + 1 >= quiz.length) {
+      setQuizDone(true);
+      updateStreak();
+    } else {
+      setCurrentQ(p => p + 1);
+    }
   }
 
   const score = quiz.filter(q => q.status === "correct").length;
   const todayDone = streak.lastDate === getTodayStr();
-
-  // ── Styles ──
   const card = { background:"#fff", border:"0.5px solid #e0e0e0", borderRadius:12, padding:"1rem 1.25rem" };
   const btn  = { borderRadius:8, fontWeight:500, fontSize:14, cursor:"pointer", padding:"9px 18px" };
+
+  // current question and its answered state
+  const currentQuestion = quiz[currentQ];
+  const isAnswered = currentQuestion && currentQuestion.status !== "unanswered";
 
   return (
     <div style={{ fontFamily:"-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", maxWidth:640, margin:"0 auto", padding:"1.5rem 1rem", background:"#f9f9f7", minHeight:"100vh" }}>
@@ -263,8 +246,7 @@ export default function App() {
               ...btn,
               background: loading||!inputWord.trim() ? "#eee" : "#111",
               color: loading||!inputWord.trim() ? "#aaa" : "#fff",
-              border:"none",
-              cursor: loading||!inputWord.trim() ? "default" : "pointer",
+              border:"none", cursor: loading||!inputWord.trim() ? "default" : "pointer",
             }}>{loading ? "Looking up…" : "Look Up"}</button>
           </div>
 
@@ -374,54 +356,66 @@ export default function App() {
             </div>
           )}
 
-          {quizStarted && !quizDone && quiz.length > 0 && (() => {
-            const q = quiz[currentQ];
-            return (
-              <div>
-                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12 }}>
-                  <span style={{ fontSize:13, color:"#888" }}>Question {currentQ+1} / {quiz.length}</span>
-                  <span style={{ fontSize:13, color:"#888" }}>{quiz.filter(x=>x.status==="correct").length} correct</span>
-                </div>
-                <div style={{ height:4, background:"#eee", borderRadius:99, marginBottom:20, overflow:"hidden" }}>
-                  <div style={{ height:"100%", width:`${((currentQ+1)/quiz.length)*100}%`, background:"#111", borderRadius:99, transition:"width 0.3s" }} />
-                </div>
-                <div style={card}>
-                  <p style={{ fontSize:11, color:"#aaa", margin:"0 0 12px", textTransform:"uppercase", letterSpacing:"0.05em" }}>Fill in the blank</p>
-                  <p style={{ fontSize:17, lineHeight:1.9, margin:"0 0 20px", fontStyle:"italic", color:"#222" }}>{q.blankSentence}</p>
-                  {!showResult && (
-                    <div style={{ display:"flex", gap:8 }}>
-                      <input autoFocus value={q.userAnswer}
-                        onChange={e => handleAnswer(e.target.value)}
-                        onKeyDown={e => { if (e.key === "Enter" && q.userAnswer.trim() && !showResult) { e.preventDefault(); submitAnswer(); } }}
-                        placeholder="Type your answer…"
-                        style={{ flex:1, fontSize:15, padding:"9px 12px", borderRadius:8, border:"1px solid #ccc", outline:"none", background:"#fff", color:"#111" }}
-                      />
-                      <button onClick={submitAnswer} disabled={!q.userAnswer.trim()} style={{
-                        ...btn, border:"none",
-                        background: q.userAnswer.trim() ? "#111" : "#eee",
-                        color: q.userAnswer.trim() ? "#fff" : "#aaa",
-                        cursor: q.userAnswer.trim() ? "pointer" : "default",
-                      }}>Check</button>
-                    </div>
-                  )}
-                  {showResult && (
-                    <div>
-                      <div style={{ borderRadius:8, padding:"12px 16px", marginBottom:14, background: q.status==="correct" ? "#EAF3DE" : "#FCEBEB", border:`1px solid ${q.status==="correct" ? "#97C459" : "#F09595"}` }}>
-                        <p style={{ margin:0, fontWeight:600, fontSize:14, color: q.status==="correct" ? "#3B6D11" : "#A32D2D" }}>
-                          {q.status==="correct" ? "✓ Correct!" : `✗ The answer is: ${q.word}`}
-                        </p>
-                        {q.status==="wrong" && <p style={{ margin:"6px 0 0", fontSize:13, color:"#A32D2D" }}>You wrote: {q.userAnswer || "(blank)"}</p>}
-                      </div>
-                      <p style={{ fontSize:13, color:"#666", margin:"0 0 14px", fontStyle:"italic" }}>Full sentence: {q.sampleSentence}</p>
-                      <button onClick={nextQuestion} style={{ ...btn, width:"100%", border:"none", background:"#111", color:"#fff" }}>
-                        {currentQ+1 < quiz.length ? "Next →" : "See Results"}
-                      </button>
-                    </div>
-                  )}
-                </div>
+          {quizStarted && !quizDone && currentQuestion && (
+            <div>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12 }}>
+                <span style={{ fontSize:13, color:"#888" }}>Question {currentQ+1} / {quiz.length}</span>
+                <span style={{ fontSize:13, color:"#888" }}>{quiz.filter(x=>x.status==="correct").length} correct</span>
               </div>
-            );
-          })()}
+              <div style={{ height:4, background:"#eee", borderRadius:99, marginBottom:20, overflow:"hidden" }}>
+                <div style={{ height:"100%", width:`${((currentQ+1)/quiz.length)*100}%`, background:"#111", borderRadius:99, transition:"width 0.3s" }} />
+              </div>
+              <div style={card}>
+                <p style={{ fontSize:11, color:"#aaa", margin:"0 0 12px", textTransform:"uppercase", letterSpacing:"0.05em" }}>Fill in the blank</p>
+                <p style={{ fontSize:17, lineHeight:1.9, margin:"0 0 20px", fontStyle:"italic", color:"#222" }}>{currentQuestion.blankSentence}</p>
+
+                {/* ── Input area — only shown when not yet answered ── */}
+                {!isAnswered && (
+                  <div style={{ display:"flex", gap:8 }}>
+                    <input
+                      autoFocus
+                      value={inputVal}
+                      onChange={e => setInputVal(e.target.value)}
+                      onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); if (inputVal.trim()) submitAnswer(); } }}
+                      placeholder="Type your answer…"
+                      style={{ flex:1, fontSize:15, padding:"9px 12px", borderRadius:8, border:"1px solid #ccc", outline:"none", background:"#fff", color:"#111" }}
+                    />
+                    <button
+                      onClick={submitAnswer}
+                      disabled={!inputVal.trim()}
+                      style={{
+                        ...btn, border:"none",
+                        background: inputVal.trim() ? "#111" : "#eee",
+                        color: inputVal.trim() ? "#fff" : "#aaa",
+                        cursor: inputVal.trim() ? "pointer" : "default",
+                      }}
+                    >Check</button>
+                  </div>
+                )}
+
+                {/* ── Result area — only shown after answered ── */}
+                {isAnswered && (
+                  <div>
+                    <div style={{ borderRadius:8, padding:"12px 16px", marginBottom:14, background: currentQuestion.status==="correct" ? "#EAF3DE" : "#FCEBEB", border:`1px solid ${currentQuestion.status==="correct" ? "#97C459" : "#F09595"}` }}>
+                      <p style={{ margin:0, fontWeight:600, fontSize:14, color: currentQuestion.status==="correct" ? "#3B6D11" : "#A32D2D" }}>
+                        {currentQuestion.status==="correct" ? "✓ Correct!" : `✗ The answer is: ${currentQuestion.word}`}
+                      </p>
+                      {currentQuestion.status==="wrong" && (
+                        <p style={{ margin:"6px 0 0", fontSize:13, color:"#A32D2D" }}>You wrote: {currentQuestion.userAnswer || "(blank)"}</p>
+                      )}
+                    </div>
+                    <p style={{ fontSize:13, color:"#666", margin:"0 0 14px", fontStyle:"italic" }}>Full sentence: {currentQuestion.sampleSentence}</p>
+                    <button
+                      onClick={nextQuestion}
+                      style={{ ...btn, width:"100%", border:"none", background:"#111", color:"#fff" }}
+                    >
+                      {currentQ+1 < quiz.length ? "Next →" : "See Results"}
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {quizDone && quiz.length > 0 && (
             <div style={{ textAlign:"center", padding:"1rem 0" }}>
