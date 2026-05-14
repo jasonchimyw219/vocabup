@@ -223,7 +223,7 @@ export default function App() {
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"1.5rem", flexWrap:"wrap", gap:8 }}>
         <div>
           <div style={{ display:"flex", alignItems:"baseline", gap:10 }}>
-            <span style={{ fontSize:22, fontWeight:600, color:"#111" }}>VocabUp</span>
+            <span style={{ fontSize:22, fontWeight:600, color:"#111" }}>Jason Chim English Vocabulary Bank</span>
             <span style={{ fontSize:13, color:"#666", background:"#eee", borderRadius:99, padding:"2px 10px" }}>HKDSE F4–6</span>
           </div>
           <p style={{ fontSize:14, color:"#666", margin:"4px 0 0" }}>Build vocabulary. Train memory. Ace the exam.</p>
