@@ -390,7 +390,7 @@ export default function App() {
                     <div style={{ display:"flex", gap:8 }}>
                       <input autoFocus value={q.userAnswer}
                         onChange={e => handleAnswer(e.target.value)}
-                        onKeyDown={e => e.key==="Enter" && q.userAnswer.trim() && submitAnswer()}
+                        onKeyDown={e => { if (e.key === "Enter" && q.userAnswer.trim() && !showResult) { e.preventDefault(); submitAnswer(); } }}
                         placeholder="Type your answer…"
                         style={{ flex:1, fontSize:15, padding:"9px 12px", borderRadius:8, border:"1px solid #ccc", outline:"none", background:"#fff", color:"#111" }}
                       />
