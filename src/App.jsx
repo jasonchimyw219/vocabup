@@ -93,22 +93,20 @@ function buildQuiz(vocabList) {
   }));
 }
 
-// Robust fetch: tolerates worker returning either the legacy { text } shape
-// or the new { data } shape, surfaces real error messages, and short-circuits
-// on iOS-friendly cache misses.
+// ── iOS FIX ──────────────────────────────────────────────────────────────
+// Use Content-Type "text/plain" so iOS WebKit treats this as a "simple"
+// cross-origin request and skips the CORS preflight (OPTIONS) entirely.
+// The body is still JSON. The Cloudflare worker parses the body with
+// request.json(), which ignores Content-Type, so the server still works.
 async function fetchWordData(word) {
   let res;
   try {
     res = await fetch(WORKER_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      headers: { "Content-Type": "text/plain" },
       body: JSON.stringify({ word }),
-      cache: "no-store",
-      mode: "cors",
-      credentials: "omit",
     });
   } catch (e) {
-    // Network / CORS preflight failure on iOS lands here.
     throw new Error(`Network error: ${e.message}`);
   }
 
@@ -123,7 +121,6 @@ async function fetchWordData(word) {
     throw new Error(payload.error || `Request failed (${res.status})`);
   }
 
-  // Prefer pre-parsed object from new worker; fall back to parsing text.
   if (payload.data && typeof payload.data === "object") return payload.data;
   if (typeof payload.text === "string") {
     return JSON.parse(payload.text.replace(/```json|```/gi, "").trim());
@@ -135,8 +132,6 @@ const TABS = ["Learn", "My Vocab", "Daily Quiz"];
 const diffColor = { Foundation: "#0F6E56", Core: "#185FA5", Extended: "#533AB7" };
 const diffBg = { Foundation: "#E1F5EE", Core: "#E6F1FB", Extended: "#EEEDFE" };
 
-// iOS-friendly input props: prevent autocorrect mangling words, prevent
-// auto-capitalization, and use 16px font-size so iOS doesn't auto-zoom on focus.
 const iosInputProps = {
   autoComplete: "off",
   autoCorrect: "off",
@@ -146,7 +141,7 @@ const iosInputProps = {
 };
 const inputStyleBase = {
   flex: 1,
-  fontSize: 16, // <-- 16px or larger prevents iOS Safari/Chrome zoom on focus
+  fontSize: 16,
   padding: "10px 12px",
   borderRadius: 8,
   border: "1px solid #ccc",
@@ -207,8 +202,6 @@ export default function App() {
   const [streak, setStreak] = useState({ count: 0, lastDate: "" });
   const [inputVal, setInputVal] = useState("");
 
-  // Track first-mount so we don't immediately overwrite localStorage with the
-  // empty initial state before the load effect has populated it.
   const hydrated = useRef(false);
 
   useEffect(() => {
@@ -287,7 +280,6 @@ export default function App() {
     try {
       setPreviewCard(await fetchWordData(term));
     } catch (e) {
-      // Surface the real error so iOS issues are debuggable in the wild.
       setError(`Could not look up this word. ${e.message || ""}`.trim());
     } finally {
       setLoading(false);
@@ -303,7 +295,6 @@ export default function App() {
     setVocabList((prev) => [
       {
         ...previewCard,
-        // crypto.randomUUID is supported on iOS 15.4+ and all modern browsers.
         id:
           (typeof crypto !== "undefined" && crypto.randomUUID && crypto.randomUUID()) ||
           `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -371,12 +362,12 @@ export default function App() {
   const btn = {
     borderRadius: 8,
     fontWeight: 500,
-    fontSize: 15, // 15px on buttons is fine; only inputs need 16+ to avoid iOS zoom
+    fontSize: 15,
     cursor: "pointer",
     padding: "10px 18px",
     WebkitAppearance: "none",
     appearance: "none",
-    touchAction: "manipulation", // removes 300ms tap delay on iOS
+    touchAction: "manipulation",
   };
 
   const currentQuestion = quiz[currentQ];
@@ -391,11 +382,9 @@ export default function App() {
         padding: "1.5rem 1rem",
         background: "#f9f9f7",
         minHeight: "100vh",
-        // Avoid iOS rubber-band scroll showing weird background colors
         WebkitTextSizeAdjust: "100%",
       }}
     >
-      {/* Header */}
       <div
         style={{
           display: "flex",
@@ -430,7 +419,6 @@ export default function App() {
         <StreakBadge streak={streak} />
       </div>
 
-      {/* Tabs */}
       <div
         style={{
           display: "flex",
@@ -489,7 +477,6 @@ export default function App() {
         ))}
       </div>
 
-      {/* ── LEARN ── */}
       {tab === 0 && (
         <div>
           <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
@@ -649,7 +636,6 @@ export default function App() {
         </div>
       )}
 
-      {/* ── MY VOCAB ── */}
       {tab === 1 && (
         <div>
           {!vocabList.length ? (
@@ -752,7 +738,6 @@ export default function App() {
         </div>
       )}
 
-      {/* ── DAILY QUIZ ── */}
       {tab === 2 && (
         <div>
           {!vocabList.length && (
