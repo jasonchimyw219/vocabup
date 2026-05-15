@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/lookup",
+      "destination": "https://vocabup-proxy.jasonchimyw.workers.dev/"
+    }
+  ]
+}

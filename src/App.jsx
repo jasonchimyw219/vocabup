@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
-const WORKER_URL = "https://vocabup-proxy.jasonchimyw.workers.dev/";
+const WORKER_URL = "/api/lookup";
 const DAILY_LOOKUP_LIMIT = 10;
 const DAILY_QUIZ_SENTENCE_REFRESH_LIMIT = 10;
 
