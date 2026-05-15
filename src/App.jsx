@@ -1,9 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-
-const WORKER_URL = "/api/lookup";
+const WORKER_URL = "https://vocabup-proxy.jasonchimyw.workers.dev/";
 const DAILY_LOOKUP_LIMIT = 10;
 const DAILY_QUIZ_SENTENCE_REFRESH_LIMIT = 10;
-
 const storage = {
   get: (key) => {
     try {
@@ -21,7 +19,6 @@ const storage = {
     }
   },
 };
-
 const SK = {
   vocab: "hkdse_vocab_list",
   quiz: "hkdse_quiz_state",
@@ -30,36 +27,30 @@ const SK = {
   lookupUsage: "hkdse_lookup_usage",
   quizSentenceUsage: "hkdse_quiz_sentence_usage",
 };
-
 function getTodayStr() {
   return new Date().toISOString().split("T")[0];
 }
-
 function getYesterdayStr() {
   const d = new Date();
   d.setDate(d.getDate() - 1);
   return d.toISOString().split("T")[0];
 }
-
 function getDailyUsage(key) {
   const today = getTodayStr();
   const saved = storage.get(key);
   if (!saved || saved.date !== today) return { date: today, count: 0 };
   return { date: today, count: Number(saved.count) || 0 };
 }
-
 function getRemainingDailyUsage(key, limit) {
   const usage = getDailyUsage(key);
   return Math.max(0, limit - usage.count);
 }
-
 function consumeDailyUsage(key, limit, amount = 1) {
   const usage = getDailyUsage(key);
   if (usage.count + amount > limit) return false;
   storage.set(key, { date: usage.date, count: usage.count + amount });
   return true;
 }
-
 function calcWeight(v) {
   const shown = v.timesShown || 0;
   const correct = v.timesCorrect || 0;
@@ -69,7 +60,6 @@ function calcWeight(v) {
     : 999;
   return Math.max(1, 5 - ratio * 4 + Math.min(daysSince * 0.3, 3));
 }
-
 function weightedSample(list, n) {
   const pool = list.map((v) => ({ ...v, _w: calcWeight(v) }));
   const totalW = pool.reduce((s, v) => s + v._w, 0);
@@ -77,11 +67,9 @@ function weightedSample(list, n) {
   const used = new Set();
   const cap = Math.min(n, pool.length);
   let safety = 0;
-
   while (picked.length < cap && safety++ < 300) {
     let r = Math.random() * totalW;
     let added = false;
-
     for (const v of pool) {
       r -= v._w;
       if (r <= 0 && !used.has(v.id)) {
@@ -91,7 +79,6 @@ function weightedSample(list, n) {
         break;
       }
     }
-
     if (!added) {
       for (const v of pool) {
         if (!used.has(v.id)) {
@@ -102,20 +89,15 @@ function weightedSample(list, n) {
       }
     }
   }
-
   return picked;
 }
-
 async function buildQuiz(vocabList, { refreshSentences = false } = {}) {
   if (!vocabList.length) return [];
-
   const picked = weightedSample(vocabList, 10);
-
   return Promise.all(
     picked.map(async (v) => {
       let sampleSentence = v.sampleSentence;
       let blankSentence = v.blankSentence;
-
       if (
         refreshSentences &&
         getRemainingDailyUsage(SK.quizSentenceUsage, DAILY_QUIZ_SENTENCE_REFRESH_LIMIT) > 0 &&
@@ -131,7 +113,6 @@ async function buildQuiz(vocabList, { refreshSentences = false } = {}) {
           /* use saved sentence if refresh fails */
         }
       }
-
       return {
         id: v.id,
         word: v.word,
@@ -144,43 +125,41 @@ async function buildQuiz(vocabList, { refreshSentences = false } = {}) {
     })
   );
 }
-
 async function fetchWordData(word) {
   let res;
   try {
     res = await fetch(WORKER_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      // ── iOS FIX ── text/plain skips the CORS preflight that fails on iOS WebKit.
+      // The worker parses the body as JSON regardless of Content-Type.
+      headers: { "Content-Type": "text/plain" },
       body: JSON.stringify({ word }),
     });
   } catch (e) {
     throw new Error(`Network error: ${e.message}`);
   }
-
   let payload;
   try {
     payload = await res.json();
   } catch {
     throw new Error(`Bad response (status ${res.status})`);
   }
-
   if (!res.ok || payload.error) {
     throw new Error(payload.error || `Request failed (${res.status})`);
   }
-
   if (payload.data && typeof payload.data === "object") return payload.data;
   if (typeof payload.text === "string") {
     return JSON.parse(payload.text.replace(/```json|```/gi, "").trim());
   }
   throw new Error("Empty response from server");
 }
-
 async function fetchFreshSentence(vocab) {
   let res;
   try {
     res = await fetch(WORKER_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      // ── iOS FIX ── same reason as fetchWordData above.
+      headers: { "Content-Type": "text/plain" },
       body: JSON.stringify({
         mode: "sentence",
         word: vocab.word,
@@ -190,29 +169,24 @@ async function fetchFreshSentence(vocab) {
   } catch (e) {
     throw new Error(`Network error: ${e.message}`);
   }
-
   let payload;
   try {
     payload = await res.json();
   } catch {
     throw new Error(`Bad response (status ${res.status})`);
   }
-
   if (!res.ok || payload.error) {
     throw new Error(payload.error || `Request failed (${res.status})`);
   }
-
   if (payload.data && typeof payload.data === "object") return payload.data;
   if (typeof payload.text === "string") {
     return JSON.parse(payload.text.replace(/```json|```/gi, "").trim());
   }
   throw new Error("Empty response from server");
 }
-
 const TABS = ["Learn", "My Vocab", "Daily Quiz"];
 const diffColor = { Foundation: "#0F6E56", Core: "#185FA5", Extended: "#533AB7" };
 const diffBg = { Foundation: "#E1F5EE", Core: "#E6F1FB", Extended: "#EEEDFE" };
-
 const iosInputProps = {
   autoComplete: "off",
   autoCorrect: "off",
@@ -220,7 +194,6 @@ const iosInputProps = {
   spellCheck: false,
   inputMode: "text",
 };
-
 const inputStyleBase = {
   flex: 1,
   fontSize: 16,
@@ -233,7 +206,6 @@ const inputStyleBase = {
   WebkitAppearance: "none",
   appearance: "none",
 };
-
 function StreakBadge({ streak }) {
   if (!streak || streak.count === 0) return null;
   const flames = streak.count >= 30 ? "🔥🔥🔥" : streak.count >= 7 ? "🔥🔥" : "🔥";
@@ -256,7 +228,6 @@ function StreakBadge({ streak }) {
     </div>
   );
 }
-
 function SRBadge({ v }) {
   const shown = v.timesShown || 0;
   if (shown === 0) return <span style={{ fontSize: 11, color: "#888" }}>New</span>;
@@ -269,7 +240,6 @@ function SRBadge({ v }) {
     </span>
   );
 }
-
 export default function App() {
   const [tab, setTab] = useState(0);
   const [vocabList, setVocabList] = useState([]);
@@ -285,9 +255,7 @@ export default function App() {
   const [streak, setStreak] = useState({ count: 0, lastDate: "" });
   const [inputVal, setInputVal] = useState("");
   const [lookupRemaining, setLookupRemaining] = useState(DAILY_LOOKUP_LIMIT);
-
   const hydrated = useRef(false);
-
   useEffect(() => {
     const savedVocab = storage.get(SK.vocab);
     const savedStreak = storage.get(SK.streak);
@@ -296,21 +264,17 @@ export default function App() {
     setLookupRemaining(getRemainingDailyUsage(SK.lookupUsage, DAILY_LOOKUP_LIMIT));
     hydrated.current = true;
   }, []);
-
   useEffect(() => {
     if (hydrated.current) storage.set(SK.vocab, vocabList);
   }, [vocabList]);
-
   useEffect(() => {
     if (hydrated.current) storage.set(SK.streak, streak);
   }, [streak]);
-
   useEffect(() => {
     if (tab !== 2 || !vocabList.length) return;
     const lastDate = storage.get(SK.lastQuiz);
     const savedQuiz = storage.get(SK.quiz);
     const today = getTodayStr();
-
     if (lastDate === today && savedQuiz) {
       setQuiz(savedQuiz);
       const allDone = savedQuiz.every((q) => q.status !== "unanswered");
@@ -326,12 +290,10 @@ export default function App() {
     }
     setInputVal("");
   }, [tab, vocabList]);
-
   const saveQuiz = useCallback((q) => {
     storage.set(SK.quiz, q);
     storage.set(SK.lastQuiz, getTodayStr());
   }, []);
-
   function updateStreak() {
     const today = getTodayStr();
     const yesterday = getYesterdayStr();
@@ -343,7 +305,6 @@ export default function App() {
       };
     });
   }
-
   function updateVocabStats(wordId, wasCorrect) {
     setVocabList((prev) =>
       prev.map((v) => {
@@ -357,22 +318,18 @@ export default function App() {
       })
     );
   }
-
   async function handleLookup() {
     const term = inputWord.trim();
     if (!term) return;
-
     if (!consumeDailyUsage(SK.lookupUsage, DAILY_LOOKUP_LIMIT)) {
       setError(`Daily lookup limit reached. Try again tomorrow. (${DAILY_LOOKUP_LIMIT}/day)`);
       setLookupRemaining(0);
       return;
     }
-
     setLookupRemaining(getRemainingDailyUsage(SK.lookupUsage, DAILY_LOOKUP_LIMIT));
     setLoading(true);
     setError("");
     setPreviewCard(null);
-
     try {
       setPreviewCard(await fetchWordData(term));
     } catch (e) {
@@ -381,7 +338,6 @@ export default function App() {
       setLoading(false);
     }
   }
-
   function handleSave() {
     if (!previewCard) return;
     if (vocabList.find((v) => v.word.toLowerCase() === previewCard.word.toLowerCase())) {
@@ -406,15 +362,12 @@ export default function App() {
     setError("");
     setTab(1);
   }
-
   function handleDelete(id) {
     setVocabList((prev) => prev.filter((v) => v.id !== id));
   }
-
   async function startQuiz() {
     setQuizLoading(true);
     setError("");
-
     try {
       const q = await buildQuiz(vocabList, { refreshSentences: true });
       setQuiz(q);
@@ -429,7 +382,6 @@ export default function App() {
       setQuizLoading(false);
     }
   }
-
   function submitAnswer() {
     const q = quiz[currentQ];
     if (q.status !== "unanswered") return;
@@ -445,7 +397,6 @@ export default function App() {
       return updated;
     });
   }
-
   function nextQuestion() {
     setInputVal("");
     if (currentQ + 1 >= quiz.length) {
@@ -455,7 +406,6 @@ export default function App() {
       setCurrentQ((p) => p + 1);
     }
   }
-
   const score = quiz.filter((q) => q.status === "correct").length;
   const todayDone = streak.lastDate === getTodayStr();
   const card = {
@@ -474,10 +424,8 @@ export default function App() {
     appearance: "none",
     touchAction: "manipulation",
   };
-
   const currentQuestion = quiz[currentQ];
   const isAnswered = currentQuestion && currentQuestion.status !== "unanswered";
-
   return (
     <div
       style={{
@@ -523,7 +471,6 @@ export default function App() {
         </div>
         <StreakBadge streak={streak} />
       </div>
-
       <div
         style={{
           display: "flex",
@@ -581,7 +528,6 @@ export default function App() {
           </button>
         ))}
       </div>
-
       {tab === 0 && (
         <div>
           <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
@@ -608,15 +554,12 @@ export default function App() {
               {loading ? "Looking up..." : "Look Up"}
             </button>
           </div>
-
           <p style={{ fontSize: 12, color: "#999", margin: "0 0 12px" }}>
             {lookupRemaining} / {DAILY_LOOKUP_LIMIT} lookups left today on this device.
           </p>
-
           {error && (
             <p style={{ color: "#c0392b", fontSize: 14, margin: "0 0 12px" }}>{error}</p>
           )}
-
           {!previewCard && !loading && (
             <div
               style={{
@@ -632,7 +575,6 @@ export default function App() {
               listening.
             </div>
           )}
-
           {loading && (
             <div style={{ textAlign: "center", padding: "2.5rem", color: "#888", fontSize: 14 }}>
               <div
@@ -649,7 +591,6 @@ export default function App() {
               <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
             </div>
           )}
-
           {previewCard && (
             <div style={card}>
               <div
@@ -746,7 +687,6 @@ export default function App() {
           )}
         </div>
       )}
-
       {tab === 1 && (
         <div>
           {!vocabList.length ? (
@@ -848,7 +788,6 @@ export default function App() {
           )}
         </div>
       )}
-
       {tab === 2 && (
         <div>
           {!vocabList.length && (
@@ -863,7 +802,6 @@ export default function App() {
               Save at least one word before taking a quiz.
             </div>
           )}
-
           {vocabList.length > 0 && !quizStarted && (
             <div style={{ textAlign: "center", padding: "2rem 1rem" }}>
               {error && (
@@ -906,7 +844,6 @@ export default function App() {
               </button>
             </div>
           )}
-
           {quizStarted && !quizDone && currentQuestion && (
             <div>
               <div
@@ -966,7 +903,6 @@ export default function App() {
                 >
                   {currentQuestion.blankSentence}
                 </p>
-
                 {!isAnswered && (
                   <div style={{ display: "flex", gap: 8 }}>
                     <input
@@ -997,7 +933,6 @@ export default function App() {
                     </button>
                   </div>
                 )}
-
                 {isAnswered && (
                   <div>
                     <div
@@ -1057,7 +992,6 @@ export default function App() {
               </div>
             </div>
           )}
-
           {quizDone && quiz.length > 0 && (
             <div style={{ textAlign: "center", padding: "1rem 0" }}>
               <div style={{ fontSize: 48, marginBottom: 8 }}>
