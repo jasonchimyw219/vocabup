@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
 const WORKER_URL = "https://vocabup-proxy.jasonchimyw.workers.dev/";
+const DAILY_LOOKUP_LIMIT = 10;
+const DAILY_QUIZ_SENTENCE_REFRESH_LIMIT = 10;
 
-// Safe storage wrapper. iOS Safari/Chrome in Private Browsing throws
-// QuotaExceededError on setItem — swallow it instead of crashing the app.
 const storage = {
   get: (key) => {
     try {
@@ -17,7 +17,7 @@ const storage = {
     try {
       localStorage.setItem(key, JSON.stringify(val));
     } catch (_) {
-      /* private mode / quota — silently ignore */
+      /* private mode / quota - silently ignore */
     }
   },
 };
@@ -27,15 +27,37 @@ const SK = {
   quiz: "hkdse_quiz_state",
   lastQuiz: "hkdse_last_quiz_date",
   streak: "hkdse_streak",
+  lookupUsage: "hkdse_lookup_usage",
+  quizSentenceUsage: "hkdse_quiz_sentence_usage",
 };
 
 function getTodayStr() {
   return new Date().toISOString().split("T")[0];
 }
+
 function getYesterdayStr() {
   const d = new Date();
   d.setDate(d.getDate() - 1);
   return d.toISOString().split("T")[0];
+}
+
+function getDailyUsage(key) {
+  const today = getTodayStr();
+  const saved = storage.get(key);
+  if (!saved || saved.date !== today) return { date: today, count: 0 };
+  return { date: today, count: Number(saved.count) || 0 };
+}
+
+function getRemainingDailyUsage(key, limit) {
+  const usage = getDailyUsage(key);
+  return Math.max(0, limit - usage.count);
+}
+
+function consumeDailyUsage(key, limit, amount = 1) {
+  const usage = getDailyUsage(key);
+  if (usage.count + amount > limit) return false;
+  storage.set(key, { date: usage.date, count: usage.count + amount });
+  return true;
 }
 
 function calcWeight(v) {
@@ -51,13 +73,15 @@ function calcWeight(v) {
 function weightedSample(list, n) {
   const pool = list.map((v) => ({ ...v, _w: calcWeight(v) }));
   const totalW = pool.reduce((s, v) => s + v._w, 0);
-  const picked = [],
-    used = new Set();
+  const picked = [];
+  const used = new Set();
   const cap = Math.min(n, pool.length);
   let safety = 0;
+
   while (picked.length < cap && safety++ < 300) {
-    let r = Math.random() * totalW,
-      added = false;
+    let r = Math.random() * totalW;
+    let added = false;
+
     for (const v of pool) {
       r -= v._w;
       if (r <= 0 && !used.has(v.id)) {
@@ -67,6 +91,7 @@ function weightedSample(list, n) {
         break;
       }
     }
+
     if (!added) {
       for (const v of pool) {
         if (!used.has(v.id)) {
@@ -77,27 +102,49 @@ function weightedSample(list, n) {
       }
     }
   }
+
   return picked;
 }
 
-function buildQuiz(vocabList) {
+async function buildQuiz(vocabList, { refreshSentences = false } = {}) {
   if (!vocabList.length) return [];
-  return weightedSample(vocabList, 10).map((v) => ({
-    id: v.id,
-    word: v.word,
-    blankSentence: v.blankSentence,
-    sampleSentence: v.sampleSentence,
-    answer: v.word.toLowerCase().trim(),
-    userAnswer: "",
-    status: "unanswered",
-  }));
+
+  const picked = weightedSample(vocabList, 10);
+
+  return Promise.all(
+    picked.map(async (v) => {
+      let sampleSentence = v.sampleSentence;
+      let blankSentence = v.blankSentence;
+
+      if (
+        refreshSentences &&
+        getRemainingDailyUsage(SK.quizSentenceUsage, DAILY_QUIZ_SENTENCE_REFRESH_LIMIT) > 0 &&
+        consumeDailyUsage(SK.quizSentenceUsage, DAILY_QUIZ_SENTENCE_REFRESH_LIMIT)
+      ) {
+        try {
+          const fresh = await fetchFreshSentence(v);
+          if (fresh.sampleSentence && fresh.blankSentence) {
+            sampleSentence = fresh.sampleSentence;
+            blankSentence = fresh.blankSentence;
+          }
+        } catch (_) {
+          /* use saved sentence if refresh fails */
+        }
+      }
+
+      return {
+        id: v.id,
+        word: v.word,
+        blankSentence,
+        sampleSentence,
+        answer: v.word.toLowerCase().trim(),
+        userAnswer: "",
+        status: "unanswered",
+      };
+    })
+  );
 }
 
-// ── iOS FIX ──────────────────────────────────────────────────────────────
-// Use Content-Type "text/plain" so iOS WebKit treats this as a "simple"
-// cross-origin request and skips the CORS preflight (OPTIONS) entirely.
-// The body is still JSON. The Cloudflare worker parses the body with
-// request.json(), which ignores Content-Type, so the server still works.
 async function fetchWordData(word) {
   let res;
   try {
@@ -105,6 +152,40 @@ async function fetchWordData(word) {
       method: "POST",
       headers: { "Content-Type": "text/plain" },
       body: JSON.stringify({ word }),
+    });
+  } catch (e) {
+    throw new Error(`Network error: ${e.message}`);
+  }
+
+  let payload;
+  try {
+    payload = await res.json();
+  } catch {
+    throw new Error(`Bad response (status ${res.status})`);
+  }
+
+  if (!res.ok || payload.error) {
+    throw new Error(payload.error || `Request failed (${res.status})`);
+  }
+
+  if (payload.data && typeof payload.data === "object") return payload.data;
+  if (typeof payload.text === "string") {
+    return JSON.parse(payload.text.replace(/```json|```/gi, "").trim());
+  }
+  throw new Error("Empty response from server");
+}
+
+async function fetchFreshSentence(vocab) {
+  let res;
+  try {
+    res = await fetch(WORKER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify({
+        mode: "sentence",
+        word: vocab.word,
+        definition: vocab.definition,
+      }),
     });
   } catch (e) {
     throw new Error(`Network error: ${e.message}`);
@@ -139,6 +220,7 @@ const iosInputProps = {
   spellCheck: false,
   inputMode: "text",
 };
+
 const inputStyleBase = {
   flex: 1,
   fontSize: 16,
@@ -193,6 +275,7 @@ export default function App() {
   const [vocabList, setVocabList] = useState([]);
   const [inputWord, setInputWord] = useState("");
   const [loading, setLoading] = useState(false);
+  const [quizLoading, setQuizLoading] = useState(false);
   const [error, setError] = useState("");
   const [previewCard, setPreviewCard] = useState(null);
   const [quiz, setQuiz] = useState([]);
@@ -201,6 +284,7 @@ export default function App() {
   const [currentQ, setCurrentQ] = useState(0);
   const [streak, setStreak] = useState({ count: 0, lastDate: "" });
   const [inputVal, setInputVal] = useState("");
+  const [lookupRemaining, setLookupRemaining] = useState(DAILY_LOOKUP_LIMIT);
 
   const hydrated = useRef(false);
 
@@ -209,12 +293,14 @@ export default function App() {
     const savedStreak = storage.get(SK.streak);
     if (savedVocab) setVocabList(savedVocab);
     if (savedStreak) setStreak(savedStreak);
+    setLookupRemaining(getRemainingDailyUsage(SK.lookupUsage, DAILY_LOOKUP_LIMIT));
     hydrated.current = true;
   }, []);
 
   useEffect(() => {
     if (hydrated.current) storage.set(SK.vocab, vocabList);
   }, [vocabList]);
+
   useEffect(() => {
     if (hydrated.current) storage.set(SK.streak, streak);
   }, [streak]);
@@ -224,6 +310,7 @@ export default function App() {
     const lastDate = storage.get(SK.lastQuiz);
     const savedQuiz = storage.get(SK.quiz);
     const today = getTodayStr();
+
     if (lastDate === today && savedQuiz) {
       setQuiz(savedQuiz);
       const allDone = savedQuiz.every((q) => q.status !== "unanswered");
@@ -232,7 +319,7 @@ export default function App() {
       const first = savedQuiz.findIndex((q) => q.status === "unanswered");
       setCurrentQ(first === -1 ? savedQuiz.length - 1 : first);
     } else {
-      setQuiz(buildQuiz(vocabList));
+      setQuiz([]);
       setQuizStarted(false);
       setQuizDone(false);
       setCurrentQ(0);
@@ -246,8 +333,8 @@ export default function App() {
   }, []);
 
   function updateStreak() {
-    const today = getTodayStr(),
-      yesterday = getYesterdayStr();
+    const today = getTodayStr();
+    const yesterday = getYesterdayStr();
     setStreak((prev) => {
       if (prev.lastDate === today) return prev;
       return {
@@ -274,9 +361,18 @@ export default function App() {
   async function handleLookup() {
     const term = inputWord.trim();
     if (!term) return;
+
+    if (!consumeDailyUsage(SK.lookupUsage, DAILY_LOOKUP_LIMIT)) {
+      setError(`Daily lookup limit reached. Try again tomorrow. (${DAILY_LOOKUP_LIMIT}/day)`);
+      setLookupRemaining(0);
+      return;
+    }
+
+    setLookupRemaining(getRemainingDailyUsage(SK.lookupUsage, DAILY_LOOKUP_LIMIT));
     setLoading(true);
     setError("");
     setPreviewCard(null);
+
     try {
       setPreviewCard(await fetchWordData(term));
     } catch (e) {
@@ -315,14 +411,23 @@ export default function App() {
     setVocabList((prev) => prev.filter((v) => v.id !== id));
   }
 
-  function startQuiz() {
-    const q = buildQuiz(vocabList);
-    setQuiz(q);
-    setCurrentQ(0);
-    setQuizStarted(true);
-    setQuizDone(false);
-    setInputVal("");
-    saveQuiz(q);
+  async function startQuiz() {
+    setQuizLoading(true);
+    setError("");
+
+    try {
+      const q = await buildQuiz(vocabList, { refreshSentences: true });
+      setQuiz(q);
+      setCurrentQ(0);
+      setQuizStarted(true);
+      setQuizDone(false);
+      setInputVal("");
+      saveQuiz(q);
+    } catch (e) {
+      setError(`Could not start quiz. ${e.message || ""}`.trim());
+    } finally {
+      setQuizLoading(false);
+    }
   }
 
   function submitAnswer() {
@@ -409,7 +514,7 @@ export default function App() {
                 padding: "2px 10px",
               }}
             >
-              HKDSE F4–6
+              HKDSE F4-6
             </span>
           </div>
           <p style={{ fontSize: 14, color: "#666", margin: "4px 0 0" }}>
@@ -479,29 +584,34 @@ export default function App() {
 
       {tab === 0 && (
         <div>
-          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
             <input
               {...iosInputProps}
               value={inputWord}
               onChange={(e) => setInputWord(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleLookup()}
-              placeholder="Type a word or phrase…"
+              placeholder="Type a word or phrase..."
               style={inputStyleBase}
             />
             <button
               onClick={handleLookup}
-              disabled={loading || !inputWord.trim()}
+              disabled={loading || !inputWord.trim() || lookupRemaining <= 0}
               style={{
                 ...btn,
-                background: loading || !inputWord.trim() ? "#eee" : "#111",
-                color: loading || !inputWord.trim() ? "#aaa" : "#fff",
+                background: loading || !inputWord.trim() || lookupRemaining <= 0 ? "#eee" : "#111",
+                color: loading || !inputWord.trim() || lookupRemaining <= 0 ? "#aaa" : "#fff",
                 border: "none",
-                cursor: loading || !inputWord.trim() ? "default" : "pointer",
+                cursor:
+                  loading || !inputWord.trim() || lookupRemaining <= 0 ? "default" : "pointer",
               }}
             >
-              {loading ? "Looking up…" : "Look Up"}
+              {loading ? "Looking up..." : "Look Up"}
             </button>
           </div>
+
+          <p style={{ fontSize: 12, color: "#999", margin: "0 0 12px" }}>
+            {lookupRemaining} / {DAILY_LOOKUP_LIMIT} lookups left today on this device.
+          </p>
 
           {error && (
             <p style={{ color: "#c0392b", fontSize: 14, margin: "0 0 12px" }}>{error}</p>
@@ -518,7 +628,8 @@ export default function App() {
                 fontSize: 14,
               }}
             >
-              Type any English word or phrase you don't know — from your textbook, reading, or listening.
+              Type any English word or phrase you don't know - from your textbook, reading, or
+              listening.
             </div>
           )}
 
@@ -534,7 +645,7 @@ export default function App() {
               >
                 ⏳
               </div>
-              <div>Generating definition…</div>
+              <div>Generating definition...</div>
               <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
             </div>
           )}
@@ -652,7 +763,7 @@ export default function App() {
           ) : (
             <>
               <p style={{ fontSize: 13, color: "#aaa", margin: "0 0 12px" }}>
-                Sorted by priority — weak words shown first. Accuracy badge shows quiz history.
+                Sorted by priority - weak words shown first. Accuracy badge shows quiz history.
               </p>
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 {[...vocabList]
@@ -755,13 +866,16 @@ export default function App() {
 
           {vocabList.length > 0 && !quizStarted && (
             <div style={{ textAlign: "center", padding: "2rem 1rem" }}>
+              {error && (
+                <p style={{ color: "#c0392b", fontSize: 14, margin: "0 0 12px" }}>{error}</p>
+              )}
               {streak.count > 0 && (
                 <div style={{ marginBottom: 20 }}>
                   <StreakBadge streak={streak} />
                   <p style={{ fontSize: 13, color: "#aaa", margin: "8px 0 0" }}>
                     {todayDone
-                      ? "Quiz complete for today — come back tomorrow!"
-                      : "Don't break your streak — quiz now!"}
+                      ? "Quiz complete for today - come back tomorrow!"
+                      : "Don't break your streak - quiz now!"}
                   </p>
                 </div>
               )}
@@ -773,20 +887,22 @@ export default function App() {
                 {Math.min(10, vocabList.length)} questions · spaced repetition active
               </p>
               <p style={{ fontSize: 13, color: "#aaa", margin: "0 0 20px" }}>
-                Words you struggle with appear more often.
+                New quiz sentences are generated each day when available.
               </p>
               <button
                 onClick={startQuiz}
+                disabled={quizLoading}
                 style={{
                   ...btn,
                   border: "none",
-                  background: "#111",
-                  color: "#fff",
+                  background: quizLoading ? "#eee" : "#111",
+                  color: quizLoading ? "#aaa" : "#fff",
+                  cursor: quizLoading ? "default" : "pointer",
                   fontSize: 15,
                   padding: "10px 28px",
                 }}
               >
-                {todayDone ? "Practice Again" : "Start Quiz"}
+                {quizLoading ? "Preparing..." : todayDone ? "Practice Again" : "Start Quiz"}
               </button>
             </div>
           )}
@@ -863,7 +979,7 @@ export default function App() {
                           if (inputVal.trim()) submitAnswer();
                         }
                       }}
-                      placeholder="Type your answer…"
+                      placeholder="Type your answer..."
                       style={inputStyleBase}
                     />
                     <button
@@ -955,7 +1071,7 @@ export default function App() {
                   ? "Perfect score! Outstanding!"
                   : score >= quiz.length * 0.7
                   ? "Great effort! Keep it up."
-                  : "Keep reviewing — you'll improve!"}
+                  : "Keep reviewing - you'll improve!"}
               </p>
               <div style={{ marginBottom: 8 }}>
                 <StreakBadge streak={streak} />
@@ -1011,14 +1127,16 @@ export default function App() {
               </div>
               <button
                 onClick={startQuiz}
+                disabled={quizLoading}
                 style={{
                   ...btn,
                   border: "1px solid #ccc",
-                  background: "#fff",
-                  color: "#111",
+                  background: quizLoading ? "#eee" : "#fff",
+                  color: quizLoading ? "#aaa" : "#111",
+                  cursor: quizLoading ? "default" : "pointer",
                 }}
               >
-                ↺ Practice Again
+                {quizLoading ? "Preparing..." : "↺ Practice Again"}
               </button>
             </div>
           )}
