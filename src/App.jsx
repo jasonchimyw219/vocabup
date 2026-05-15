@@ -150,7 +150,7 @@ async function fetchWordData(word) {
   try {
     res = await fetch(WORKER_URL, {
       method: "POST",
-      headers: { "Content-Type": "text/plain" },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ word }),
     });
   } catch (e) {
@@ -180,7 +180,7 @@ async function fetchFreshSentence(vocab) {
   try {
     res = await fetch(WORKER_URL, {
       method: "POST",
-      headers: { "Content-Type": "text/plain" },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         mode: "sentence",
         word: vocab.word,
