@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 const WORKER_URL = "https://vocabup-proxy.jasonchimyw.workers.dev/";
-const DAILY_LOOKUP_LIMIT = 10;
+const DAILY_LOOKUP_LIMIT = 20;
 const DAILY_QUIZ_SENTENCE_REFRESH_LIMIT = 10;
 const storage = {
   get: (key) => {
@@ -125,6 +125,8 @@ async function buildQuiz(vocabList, { refreshSentences = false } = {}) {
     })
   );
 }
+// Returns { word, meanings: [{partOfSpeech, definition, cantoneseHint,
+// sampleSentence, blankSentence, difficulty}, ...] }
 async function fetchWordData(word) {
   let res;
   try {
@@ -147,11 +149,40 @@ async function fetchWordData(word) {
   if (!res.ok || payload.error) {
     throw new Error(payload.error || `Request failed (${res.status})`);
   }
-  if (payload.data && typeof payload.data === "object") return payload.data;
-  if (typeof payload.text === "string") {
-    return JSON.parse(payload.text.replace(/```json|```/gi, "").trim());
+
+  let data = null;
+  if (payload.data && typeof payload.data === "object") {
+    data = payload.data;
+  } else if (typeof payload.text === "string") {
+    data = JSON.parse(payload.text.replace(/```json|```/gi, "").trim());
+  } else {
+    throw new Error("Empty response from server");
   }
-  throw new Error("Empty response from server");
+
+  // Tolerate both the new {meanings:[...]} shape and the old flat shape.
+  if (!Array.isArray(data.meanings)) {
+    if (data.definition && data.partOfSpeech) {
+      data = {
+        word: data.word || word,
+        meanings: [
+          {
+            partOfSpeech: data.partOfSpeech,
+            definition: data.definition,
+            cantoneseHint: data.cantoneseHint || "",
+            sampleSentence: data.sampleSentence || "",
+            blankSentence: data.blankSentence || "",
+            difficulty: data.difficulty || "Core",
+          },
+        ],
+      };
+    } else {
+      data = { word: data.word || word, meanings: [] };
+    }
+  }
+  if (!data.meanings.length) {
+    throw new Error("No usable meaning returned");
+  }
+  return data;
 }
 async function fetchFreshSentence(vocab) {
   let res;
@@ -247,6 +278,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [quizLoading, setQuizLoading] = useState(false);
   const [error, setError] = useState("");
+  // previewCard shape: { word, meanings: [{partOfSpeech, definition, ...}, ...] }
   const [previewCard, setPreviewCard] = useState(null);
   const [quiz, setQuiz] = useState([]);
   const [quizDone, setQuizDone] = useState(false);
@@ -321,32 +353,53 @@ export default function App() {
   async function handleLookup() {
     const term = inputWord.trim();
     if (!term) return;
-    if (!consumeDailyUsage(SK.lookupUsage, DAILY_LOOKUP_LIMIT)) {
+    // Check quota WITHOUT consuming yet — failed lookups must not burn quota.
+    if (getRemainingDailyUsage(SK.lookupUsage, DAILY_LOOKUP_LIMIT) <= 0) {
       setError(`Daily lookup limit reached. Try again tomorrow. (${DAILY_LOOKUP_LIMIT}/day)`);
       setLookupRemaining(0);
       return;
     }
-    setLookupRemaining(getRemainingDailyUsage(SK.lookupUsage, DAILY_LOOKUP_LIMIT));
     setLoading(true);
     setError("");
     setPreviewCard(null);
     try {
-      setPreviewCard(await fetchWordData(term));
+      const result = await fetchWordData(term);
+      // Only consume the quota now that we have a successful result.
+      consumeDailyUsage(SK.lookupUsage, DAILY_LOOKUP_LIMIT);
+      setLookupRemaining(getRemainingDailyUsage(SK.lookupUsage, DAILY_LOOKUP_LIMIT));
+      setPreviewCard(result);
     } catch (e) {
       setError(`Could not look up this word. ${e.message || ""}`.trim());
     } finally {
       setLoading(false);
     }
   }
-  function handleSave() {
+  function isMeaningSaved(word, partOfSpeech) {
+    if (!word || !partOfSpeech) return false;
+    const w = word.toLowerCase();
+    const p = partOfSpeech.toLowerCase();
+    return vocabList.some(
+      (v) =>
+        (v.word || "").toLowerCase() === w &&
+        (v.partOfSpeech || "").toLowerCase() === p
+    );
+  }
+  function handleSaveMeaning(meaning) {
     if (!previewCard) return;
-    if (vocabList.find((v) => v.word.toLowerCase() === previewCard.word.toLowerCase())) {
-      setError("This word is already in your list!");
+    const word = previewCard.word;
+    if (isMeaningSaved(word, meaning.partOfSpeech)) {
+      setError(`"${word}" (${meaning.partOfSpeech}) is already in your list!`);
       return;
     }
     setVocabList((prev) => [
       {
-        ...previewCard,
+        word,
+        partOfSpeech: meaning.partOfSpeech,
+        definition: meaning.definition,
+        cantoneseHint: meaning.cantoneseHint,
+        sampleSentence: meaning.sampleSentence,
+        blankSentence: meaning.blankSentence,
+        difficulty: meaning.difficulty,
         id:
           (typeof crypto !== "undefined" && crypto.randomUUID && crypto.randomUUID()) ||
           `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -357,10 +410,7 @@ export default function App() {
       },
       ...prev,
     ]);
-    setPreviewCard(null);
-    setInputWord("");
     setError("");
-    setTab(1);
   }
   function handleDelete(id) {
     setVocabList((prev) => prev.filter((v) => v.id !== id));
@@ -544,7 +594,8 @@ export default function App() {
               disabled={loading || !inputWord.trim() || lookupRemaining <= 0}
               style={{
                 ...btn,
-                background: loading || !inputWord.trim() || lookupRemaining <= 0 ? "#eee" : "#111",
+                background:
+                  loading || !inputWord.trim() || lookupRemaining <= 0 ? "#eee" : "#111",
                 color: loading || !inputWord.trim() || lookupRemaining <= 0 ? "#aaa" : "#fff",
                 border: "none",
                 cursor:
@@ -555,7 +606,8 @@ export default function App() {
             </button>
           </div>
           <p style={{ fontSize: 12, color: "#999", margin: "0 0 12px" }}>
-            {lookupRemaining} / {DAILY_LOOKUP_LIMIT} lookups left today on this device.
+            {lookupRemaining} / {DAILY_LOOKUP_LIMIT} lookups left today on this device. (Failed
+            lookups don't count.)
           </p>
           {error && (
             <p style={{ color: "#c0392b", fontSize: 14, margin: "0 0 12px" }}>{error}</p>
@@ -592,82 +644,27 @@ export default function App() {
             </div>
           )}
           {previewCard && (
-            <div style={card}>
+            <div>
+              {/* Word header */}
               <div
                 style={{
                   display: "flex",
-                  alignItems: "flex-start",
+                  alignItems: "center",
                   justifyContent: "space-between",
-                  marginBottom: 10,
+                  marginBottom: 12,
+                  flexWrap: "wrap",
                   gap: 8,
                 }}
               >
-                <div>
-                  <span style={{ fontSize: 20, fontWeight: 600, color: "#111" }}>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+                  <span style={{ fontSize: 22, fontWeight: 700, color: "#111" }}>
                     {previewCard.word}
                   </span>
-                  <span style={{ fontSize: 13, color: "#888", marginLeft: 8 }}>
-                    {previewCard.partOfSpeech}
+                  <span style={{ fontSize: 13, color: "#888" }}>
+                    {previewCard.meanings.length}{" "}
+                    {previewCard.meanings.length === 1 ? "meaning" : "meanings"} found
                   </span>
                 </div>
-                <span
-                  style={{
-                    fontSize: 12,
-                    fontWeight: 500,
-                    background: diffBg[previewCard.difficulty] || "#E1F5EE",
-                    color: diffColor[previewCard.difficulty] || "#0F6E56",
-                    borderRadius: 99,
-                    padding: "3px 10px",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {previewCard.difficulty}
-                </span>
-              </div>
-              <p style={{ fontSize: 15, margin: "0 0 6px", lineHeight: 1.6, color: "#222" }}>
-                {previewCard.definition}
-              </p>
-              <p style={{ fontSize: 13, color: "#666", margin: "0 0 14px" }}>
-                廣東話參考: <strong style={{ color: "#111" }}>{previewCard.cantoneseHint}</strong>
-              </p>
-              <div
-                style={{
-                  background: "#f5f5f3",
-                  borderRadius: 8,
-                  padding: "10px 14px",
-                  marginBottom: 14,
-                }}
-              >
-                <p
-                  style={{
-                    fontSize: 11,
-                    color: "#aaa",
-                    margin: "0 0 4px",
-                    textTransform: "uppercase",
-                    letterSpacing: "0.05em",
-                  }}
-                >
-                  Sample sentence
-                </p>
-                <p
-                  style={{
-                    fontSize: 14,
-                    margin: 0,
-                    lineHeight: 1.6,
-                    fontStyle: "italic",
-                    color: "#333",
-                  }}
-                >
-                  {previewCard.sampleSentence}
-                </p>
-              </div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button
-                  onClick={handleSave}
-                  style={{ ...btn, flex: 1, border: "none", background: "#111", color: "#fff" }}
-                >
-                  + Save to My Vocab
-                </button>
                 <button
                   onClick={() => {
                     setPreviewCard(null);
@@ -678,10 +675,121 @@ export default function App() {
                     border: "1px solid #ccc",
                     background: "#fff",
                     color: "#666",
+                    padding: "6px 14px",
+                    fontSize: 13,
                   }}
                 >
-                  Discard
+                  Done
                 </button>
+              </div>
+              {previewCard.meanings.length > 1 && (
+                <p style={{ fontSize: 13, color: "#888", margin: "0 0 12px" }}>
+                  This word has multiple meanings. Save the one(s) you want to learn.
+                </p>
+              )}
+
+              {/* Each meaning as its own card */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                {previewCard.meanings.map((m, i) => {
+                  const saved = isMeaningSaved(previewCard.word, m.partOfSpeech);
+                  return (
+                    <div key={`${m.partOfSpeech}-${i}`} style={card}>
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "flex-start",
+                          justifyContent: "space-between",
+                          marginBottom: 10,
+                          gap: 8,
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <span
+                            style={{
+                              fontSize: 13,
+                              fontWeight: 600,
+                              color: "#444",
+                              background: "#f0f0ee",
+                              borderRadius: 6,
+                              padding: "3px 10px",
+                              textTransform: "lowercase",
+                            }}
+                          >
+                            {m.partOfSpeech}
+                          </span>
+                          <span style={{ fontSize: 11, color: "#aaa" }}>#{i + 1}</span>
+                        </div>
+                        <span
+                          style={{
+                            fontSize: 12,
+                            fontWeight: 500,
+                            background: diffBg[m.difficulty] || "#E1F5EE",
+                            color: diffColor[m.difficulty] || "#0F6E56",
+                            borderRadius: 99,
+                            padding: "3px 10px",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {m.difficulty}
+                        </span>
+                      </div>
+                      <p style={{ fontSize: 15, margin: "0 0 6px", lineHeight: 1.6, color: "#222" }}>
+                        {m.definition}
+                      </p>
+                      <p style={{ fontSize: 13, color: "#666", margin: "0 0 12px" }}>
+                        廣東話參考: <strong style={{ color: "#111" }}>{m.cantoneseHint}</strong>
+                      </p>
+                      <div
+                        style={{
+                          background: "#f5f5f3",
+                          borderRadius: 8,
+                          padding: "10px 14px",
+                          marginBottom: 12,
+                        }}
+                      >
+                        <p
+                          style={{
+                            fontSize: 11,
+                            color: "#aaa",
+                            margin: "0 0 4px",
+                            textTransform: "uppercase",
+                            letterSpacing: "0.05em",
+                          }}
+                        >
+                          Sample sentence
+                        </p>
+                        <p
+                          style={{
+                            fontSize: 14,
+                            margin: 0,
+                            lineHeight: 1.6,
+                            fontStyle: "italic",
+                            color: "#333",
+                          }}
+                        >
+                          {m.sampleSentence}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => handleSaveMeaning(m)}
+                        disabled={saved}
+                        style={{
+                          ...btn,
+                          width: "100%",
+                          border: "none",
+                          background: saved ? "#E1F5EE" : "#111",
+                          color: saved ? "#0F6E56" : "#fff",
+                          cursor: saved ? "default" : "pointer",
+                          fontWeight: 600,
+                        }}
+                      >
+                        {saved
+                          ? `✓ Saved as ${m.partOfSpeech}`
+                          : `+ Save this meaning (${m.partOfSpeech})`}
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
