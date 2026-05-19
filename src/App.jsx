@@ -27,6 +27,22 @@ const SK = {
   lookupUsage: "hkdse_lookup_usage",
   quizSentenceUsage: "hkdse_quiz_sentence_usage",
 };
+// ── Storage health check ──────────────────────────────────────────────────
+// Some iOS Safari setups (Block All Cookies, Private Browsing, old iOS pre-16.4
+// home-screen web apps) silently drop localStorage writes. Detect that on
+// mount so we can warn the student instead of failing invisibly.
+function checkStorageHealth() {
+  try {
+    const k = "__hkdse_storage_test__";
+    const v = String(Date.now());
+    localStorage.setItem(k, v);
+    const got = localStorage.getItem(k);
+    localStorage.removeItem(k);
+    return got === v;
+  } catch (_) {
+    return false;
+  }
+}
 function getTodayStr() {
   return new Date().toISOString().split("T")[0];
 }
@@ -125,15 +141,11 @@ async function buildQuiz(vocabList, { refreshSentences = false } = {}) {
     })
   );
 }
-// Returns { word, meanings: [{partOfSpeech, definition, cantoneseHint,
-// sampleSentence, blankSentence, difficulty}, ...] }
 async function fetchWordData(word) {
   let res;
   try {
     res = await fetch(WORKER_URL, {
       method: "POST",
-      // ── iOS FIX ── text/plain skips the CORS preflight that fails on iOS WebKit.
-      // The worker parses the body as JSON regardless of Content-Type.
       headers: { "Content-Type": "text/plain" },
       body: JSON.stringify({ word }),
     });
@@ -159,7 +171,6 @@ async function fetchWordData(word) {
     throw new Error("Empty response from server");
   }
 
-  // Tolerate both the new {meanings:[...]} shape and the old flat shape.
   if (!Array.isArray(data.meanings)) {
     if (data.definition && data.partOfSpeech) {
       data = {
@@ -189,7 +200,6 @@ async function fetchFreshSentence(vocab) {
   try {
     res = await fetch(WORKER_URL, {
       method: "POST",
-      // ── iOS FIX ── same reason as fetchWordData above.
       headers: { "Content-Type": "text/plain" },
       body: JSON.stringify({
         mode: "sentence",
@@ -271,6 +281,34 @@ function SRBadge({ v }) {
     </span>
   );
 }
+function StorageWarning() {
+  return (
+    <div
+      style={{
+        background: "#FCEBEB",
+        border: "1px solid #F09595",
+        borderRadius: 10,
+        padding: "12px 14px",
+        marginBottom: 16,
+        fontSize: 13,
+        color: "#7A1A1A",
+        lineHeight: 1.5,
+      }}
+    >
+      <p style={{ margin: "0 0 6px", fontWeight: 700, fontSize: 14, color: "#A32D2D" }}>
+        ⚠️ Saving is disabled on this browser
+      </p>
+      <p style={{ margin: "0 0 6px" }}>
+        Your phone is blocking the app from saving vocab. Words you add here will disappear
+        when you close the tab.
+      </p>
+      <p style={{ margin: 0 }}>
+        Most likely cause: <strong>Settings → Safari → "Block All Cookies"</strong> is turned
+        on. Turn it off, then reopen this site. Or you might be in Private Browsing.
+      </p>
+    </div>
+  );
+}
 export default function App() {
   const [tab, setTab] = useState(0);
   const [vocabList, setVocabList] = useState([]);
@@ -278,7 +316,6 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [quizLoading, setQuizLoading] = useState(false);
   const [error, setError] = useState("");
-  // previewCard shape: { word, meanings: [{partOfSpeech, definition, ...}, ...] }
   const [previewCard, setPreviewCard] = useState(null);
   const [quiz, setQuiz] = useState([]);
   const [quizDone, setQuizDone] = useState(false);
@@ -287,8 +324,12 @@ export default function App() {
   const [streak, setStreak] = useState({ count: 0, lastDate: "" });
   const [inputVal, setInputVal] = useState("");
   const [lookupRemaining, setLookupRemaining] = useState(DAILY_LOOKUP_LIMIT);
+  const [storageOK, setStorageOK] = useState(true);
+  const [backupMsg, setBackupMsg] = useState("");
   const hydrated = useRef(false);
+  const fileInputRef = useRef(null);
   useEffect(() => {
+    setStorageOK(checkStorageHealth());
     const savedVocab = storage.get(SK.vocab);
     const savedStreak = storage.get(SK.streak);
     if (savedVocab) setVocabList(savedVocab);
@@ -353,7 +394,6 @@ export default function App() {
   async function handleLookup() {
     const term = inputWord.trim();
     if (!term) return;
-    // Check quota WITHOUT consuming yet — failed lookups must not burn quota.
     if (getRemainingDailyUsage(SK.lookupUsage, DAILY_LOOKUP_LIMIT) <= 0) {
       setError(`Daily lookup limit reached. Try again tomorrow. (${DAILY_LOOKUP_LIMIT}/day)`);
       setLookupRemaining(0);
@@ -364,7 +404,6 @@ export default function App() {
     setPreviewCard(null);
     try {
       const result = await fetchWordData(term);
-      // Only consume the quota now that we have a successful result.
       consumeDailyUsage(SK.lookupUsage, DAILY_LOOKUP_LIMIT);
       setLookupRemaining(getRemainingDailyUsage(SK.lookupUsage, DAILY_LOOKUP_LIMIT));
       setPreviewCard(result);
@@ -414,6 +453,89 @@ export default function App() {
   }
   function handleDelete(id) {
     setVocabList((prev) => prev.filter((v) => v.id !== id));
+  }
+  // ── Backup: export current vocab + streak to a downloadable JSON file ──
+  function handleExport() {
+    try {
+      const data = {
+        schemaVersion: 1,
+        appName: "Jason Chim English Vocabulary Bank",
+        exportedAt: new Date().toISOString(),
+        vocab: vocabList,
+        streak,
+      };
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `vocabup-backup-${getTodayStr()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setBackupMsg(`Exported ${vocabList.length} word(s) to file.`);
+    } catch (e) {
+      setBackupMsg(`Export failed: ${e.message || "unknown error"}`);
+    }
+  }
+  // ── Backup: import from a JSON file. Merges (never overwrites). ──
+  function handleImportFile(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ""; // allow re-importing the same file later
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const parsed = JSON.parse(ev.target.result);
+        if (!Array.isArray(parsed.vocab)) {
+          throw new Error("File doesn't look like a vocabup backup");
+        }
+        const seen = new Set(
+          vocabList.map(
+            (v) => `${(v.word || "").toLowerCase()}|${(v.partOfSpeech || "").toLowerCase()}`
+          )
+        );
+        const incoming = parsed.vocab.filter((v) => {
+          if (!v || !v.word || !v.partOfSpeech) return false;
+          const key = `${v.word.toLowerCase()}|${v.partOfSpeech.toLowerCase()}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        const merged = [
+          ...incoming.map((v) => ({
+            ...v,
+            id:
+              v.id ||
+              (typeof crypto !== "undefined" && crypto.randomUUID && crypto.randomUUID()) ||
+              `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            timesShown: Number(v.timesShown) || 0,
+            timesCorrect: Number(v.timesCorrect) || 0,
+            lastShown: v.lastShown || null,
+            addedDate: v.addedDate || getTodayStr(),
+          })),
+          ...vocabList,
+        ];
+        setVocabList(merged);
+        if (
+          parsed.streak &&
+          typeof parsed.streak.count === "number" &&
+          parsed.streak.count > (streak.count || 0)
+        ) {
+          setStreak(parsed.streak);
+        }
+        const skipped = parsed.vocab.length - incoming.length;
+        setBackupMsg(
+          `Imported ${incoming.length} new word(s).${
+            skipped > 0 ? ` Skipped ${skipped} already-saved.` : ""
+          }`
+        );
+      } catch (err) {
+        setBackupMsg(`Import failed: ${err.message || "could not read file"}`);
+      }
+    };
+    reader.onerror = () => setBackupMsg("Could not read the file. Try a different one.");
+    reader.readAsText(file);
   }
   async function startQuiz() {
     setQuizLoading(true);
@@ -488,6 +610,7 @@ export default function App() {
         WebkitTextSizeAdjust: "100%",
       }}
     >
+      {!storageOK && <StorageWarning />}
       <div
         style={{
           display: "flex",
@@ -645,7 +768,6 @@ export default function App() {
           )}
           {previewCard && (
             <div>
-              {/* Word header */}
               <div
                 style={{
                   display: "flex",
@@ -687,8 +809,6 @@ export default function App() {
                   This word has multiple meanings. Save the one(s) you want to learn.
                 </p>
               )}
-
-              {/* Each meaning as its own card */}
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                 {previewCard.meanings.map((m, i) => {
                   const saved = isMeaningSaved(previewCard.word, m.partOfSpeech);
@@ -797,6 +917,74 @@ export default function App() {
       )}
       {tab === 1 && (
         <div>
+          {/* ── Backup & Restore section ── */}
+          <div
+            style={{
+              background: "#fff",
+              border: "0.5px solid #e0e0e0",
+              borderRadius: 12,
+              padding: "12px 14px",
+              marginBottom: 14,
+            }}
+          >
+            <p
+              style={{
+                fontSize: 12,
+                fontWeight: 600,
+                color: "#666",
+                margin: "0 0 8px",
+                textTransform: "uppercase",
+                letterSpacing: "0.05em",
+              }}
+            >
+              💾 Backup &amp; Restore
+            </p>
+            <p style={{ fontSize: 12, color: "#888", margin: "0 0 10px", lineHeight: 1.5 }}>
+              Save your vocab to a file. Useful if you change phones, clear Safari, or your
+              browser ever loses data.
+            </p>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button
+                onClick={handleExport}
+                disabled={!vocabList.length}
+                style={{
+                  ...btn,
+                  background: vocabList.length ? "#111" : "#eee",
+                  color: vocabList.length ? "#fff" : "#aaa",
+                  border: "none",
+                  cursor: vocabList.length ? "pointer" : "default",
+                  fontSize: 13,
+                  padding: "8px 14px",
+                }}
+              >
+                ⬇ Export to file
+              </button>
+              <button
+                onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                style={{
+                  ...btn,
+                  background: "#fff",
+                  color: "#111",
+                  border: "1px solid #ccc",
+                  fontSize: 13,
+                  padding: "8px 14px",
+                }}
+              >
+                ⬆ Import from file
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/json,.json"
+                onChange={handleImportFile}
+                style={{ display: "none" }}
+              />
+            </div>
+            {backupMsg && (
+              <p style={{ fontSize: 12, color: "#3B6D11", margin: "8px 0 0" }}>{backupMsg}</p>
+            )}
+          </div>
+
           {!vocabList.length ? (
             <div
               style={{
